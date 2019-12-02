@@ -65,7 +65,12 @@ open class PanModalPresentationController: UIPresentationController {
     /**
      The y content offset value of the embedded scroll view
      */
-    private var scrollViewYOffset: CGFloat = 0.0
+	private var scrollViewYOffset: CGFloat?
+	
+	/**
+	The max value for the top inset of the embedded scroll view (used for supporting collapsing large title nav bars)
+	*/
+	private var scrollViewMaxTopInset: CGFloat = 0.0
 
     /**
      An observer for the scroll view content offset
@@ -179,7 +184,6 @@ open class PanModalPresentationController: UIPresentationController {
 
         layoutBackgroundView(in: containerView)
         layoutPresentedView(in: containerView)
-        configureScrollViewInsets()
 
         guard let coordinator = presentedViewController.transitionCoordinator else {
             backgroundView.dimState = .max
@@ -296,7 +300,6 @@ public extension PanModalPresentationController {
         configureViewLayout()
         adjustPresentedViewFrame()
         observe(scrollView: presentable?.panScrollable)
-        configureScrollViewInsets()
     }
 
 }
@@ -423,38 +426,6 @@ private extension PanModalPresentationController {
         extendsPanScrolling = layoutPresentable.allowsExtendedPanScrolling
 
         containerView?.isUserInteractionEnabled = layoutPresentable.isUserInteractionEnabled
-    }
-
-    /**
-     Configures the scroll view insets
-     */
-    func configureScrollViewInsets() {
-
-        guard
-            let scrollView = presentable?.panScrollable,
-            !scrollView.isScrolling
-            else { return }
-
-        /**
-         Disable vertical scroll indicator until we start to scroll
-         to avoid visual bugs
-         */
-        scrollView.showsVerticalScrollIndicator = false
-        scrollView.scrollIndicatorInsets = presentable?.scrollIndicatorInsets ?? .zero
-
-        /**
-         Set the appropriate contentInset as the configuration within this class
-         offsets it
-         */
-        scrollView.contentInset.bottom = presentingViewController.bottomLayoutGuide.length
-
-        /**
-         As we adjust the bounds during `handleScrollViewTopBounce`
-         we should assume that contentInsetAdjustmentBehavior will not be correct
-         */
-        if #available(iOS 11.0, *) {
-            scrollView.contentInsetAdjustmentBehavior = .never
-        }
     }
 
 }
@@ -606,7 +577,7 @@ private extension PanModalPresentationController {
         guard
             isPresentedViewAnchored,
             let scrollView = presentable?.panScrollable,
-            scrollView.contentOffset.y > 0
+            scrollView.contentOffset.y > -scrollViewMaxTopInset
             else {
                 return false
         }
@@ -721,48 +692,41 @@ private extension PanModalPresentationController {
             !presentedViewController.isBeingDismissed,
             !presentedViewController.isBeingPresented
             else { return }
-
-        if !isPresentedViewAnchored && scrollView.contentOffset.y > 0 {
-
+		
+		//Capture the top inset (this adds support for collapsing Large Title nav bars)
+		scrollViewMaxTopInset = max(scrollViewMaxTopInset, scrollView.adjustedContentInset.top)
+		
+		if !isPresentedViewAnchored && scrollView.contentOffset.y > -scrollViewMaxTopInset {
             /**
              Hold the scrollView in place if we're actively scrolling and not handling top bounce
              */
             haltScrolling(scrollView)
 
         } else if scrollView.isScrolling || isPresentedViewAnimating {
-
             if isPresentedViewAnchored {
-                /**
-                 While we're scrolling upwards on the scrollView,
-                 store the last content offset position
-                 */
-                trackScrolling(scrollView)
-            } else {
+				/**
+				While we're scrolling upwards on the scrollView,
+				store the last content offset position
+				*/
+				trackScrolling(scrollView)
+			} else {
                 /**
                  Keep scroll view in place while we're panning on main view
                  */
                 haltScrolling(scrollView)
             }
 
-        } else if presentedViewController.view.isKind(of: UIScrollView.self)
-            && !isPresentedViewAnimating && scrollView.contentOffset.y <= 0 {
-
-            /**
-             In the case where we drag down quickly on the scroll view and let go,
-             `handleScrollViewTopBounce` adds a nice elegant touch.
-             */
-            handleScrollViewTopBounce(scrollView: scrollView, change: change)
         } else {
             trackScrolling(scrollView)
         }
     }
-
+	
     /**
      Halts the scroll of a given scroll view & anchors it at the `scrollViewYOffset`
      */
     func haltScrolling(_ scrollView: UIScrollView) {
-        scrollView.setContentOffset(CGPoint(x: 0, y: scrollViewYOffset), animated: false)
-        scrollView.showsVerticalScrollIndicator = false
+		if scrollViewYOffset == nil { trackScrolling(scrollView) } //For initial setup of scrollViewYOffset
+		scrollView.setContentOffset(CGPoint(x: 0, y: max(scrollViewYOffset ?? scrollView.contentOffset.y, -scrollViewMaxTopInset)), animated: false)
     }
 
     /**
@@ -770,48 +734,9 @@ private extension PanModalPresentationController {
      This helps halt scrolling when we want to hold the scroll view in place.
      */
     func trackScrolling(_ scrollView: UIScrollView) {
-        scrollViewYOffset = max(scrollView.contentOffset.y, 0)
-        scrollView.showsVerticalScrollIndicator = true
+        scrollViewYOffset = max(scrollView.contentOffset.y, -scrollViewMaxTopInset)
     }
 
-    /**
-     To ensure that the scroll transition between the scrollView & the modal
-     is completely seamless, we need to handle the case where content offset is negative.
-
-     In this case, we follow the curve of the decelerating scroll view.
-     This gives the effect that the modal view and the scroll view are one view entirely.
-
-     - Note: This works best where the view behind view controller is a UIScrollView.
-     So, for example, a UITableViewController.
-     */
-    func handleScrollViewTopBounce(scrollView: UIScrollView, change: NSKeyValueObservedChange<CGPoint>) {
-
-        guard let oldYValue = change.oldValue?.y, scrollView.isDecelerating
-            else { return }
-
-        let yOffset = scrollView.contentOffset.y
-        let presentedSize = containerView?.frame.size ?? .zero
-
-        /**
-         Decrease the view bounds by the y offset so the scroll view stays in place
-         and we can still get updates on its content offset
-         */
-        presentedView.bounds.size = CGSize(width: presentedSize.width, height: presentedSize.height + yOffset)
-
-        if oldYValue > yOffset {
-            /**
-             Move the view in the opposite direction to the decreasing bounds
-             until half way through the deceleration so that it appears
-             as if we're transferring the scrollView drag momentum to the entire view
-             */
-            presentedView.frame.origin.y = longFormYPosition - yOffset
-        } else {
-            scrollViewYOffset = 0
-            snap(toYPosition: longFormYPosition)
-        }
-
-        scrollView.showsVerticalScrollIndicator = false
-    }
 }
 
 // MARK: - UIGestureRecognizerDelegate
